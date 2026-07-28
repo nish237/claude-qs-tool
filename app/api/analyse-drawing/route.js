@@ -177,6 +177,21 @@ export async function POST(request) {
     return NextResponse.json(normalised);
   } catch (err) {
     console.error('Analysis error:', err);
+
+    if (err.status === 401 || err.name === 'AuthenticationError' || (err.message || '').toLowerCase().includes('authentication')) {
+      return NextResponse.json(
+        { error: '401 API key error — your ANTHROPIC_API_KEY is invalid or missing. Open .env.local, paste your key (sk-ant-...), save, and restart the server.' },
+        { status: 401 }
+      );
+    }
+
+    if (err.status === 413 || (err.message || '').toLowerCase().includes('too large')) {
+      return NextResponse.json(
+        { error: 'The drawing file is too large to process. Please use a compressed PDF or a smaller image.' },
+        { status: 413 }
+      );
+    }
+
     return NextResponse.json(
       { error: err.message ?? 'An unexpected error occurred during analysis.' },
       { status: 500 }

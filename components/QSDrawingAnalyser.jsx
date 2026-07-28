@@ -147,6 +147,11 @@ export default function QSDrawingAnalyser() {
   // ── Phase 2: Rate library toast ──
   const [rateLibToast, setRateLibToast] = useState('');
 
+  // ── Calibration warning (replaces window.confirm) ──
+  const [calibWarning, setCalibWarning] = useState('');
+  // ── PDF render failure ──
+  const [pdfRenderFailed, setPdfRenderFailed] = useState(false);
+
   // ── Refs ──
   const calibCanvasRef   = useRef(null);
   const calibImgRef      = useRef(null);
@@ -214,6 +219,8 @@ export default function QSDrawingAnalyser() {
     setPixPerUnit(null);
     setCalibMode(false);
     setPdfPreviewUrl('');
+    setCalibWarning('');
+    setPdfRenderFailed(false);
 
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -221,7 +228,12 @@ export default function QSDrawingAnalyser() {
       setPreviewUrl(dataUrl);
       setFileBase64(dataUrl.split(',')[1]);
       if (isPdf) {
-        renderPdfToCanvas(dataUrl).then(setPdfPreviewUrl).catch(console.warn);
+        renderPdfToCanvas(dataUrl)
+          .then(url => {
+            if (url) { setPdfPreviewUrl(url); setPdfRenderFailed(false); }
+            else setPdfRenderFailed(true);
+          })
+          .catch(() => setPdfRenderFailed(true));
       }
     };
     reader.readAsDataURL(f);
@@ -332,16 +344,19 @@ export default function QSDrawingAnalyser() {
 
   const getCanvasPoint = (e) => {
     const canvas = calibCanvasRef.current;
+    if (!canvas) return null;
     const rect   = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
     const scaleX = canvas.width / rect.width, scaleY = canvas.height / rect.height;
     const src    = e.touches ? e.touches[0] : e;
     return { x: (src.clientX - rect.left) * scaleX, y: (src.clientY - rect.top) * scaleY };
   };
 
   const handleCanvasClick = useCallback((e) => {
-    if (!calibMode) return;
+    if (!calibMode || !calibCanvasRef.current) return;
     e.preventDefault();
     const pt = getCanvasPoint(e);
+    if (!pt) return;
     if (calibPoints.length === 0) {
       setCalibPoints([pt]);
     } else if (calibPoints.length === 1) {
@@ -362,8 +377,12 @@ export default function QSDrawingAnalyser() {
     const dim = parseFloat(realDim);
     if (calibPoints.length !== 2 || !dim || dim <= 0 || !pixelDist) return;
     const ppu = pixelDist / dim;
-    if (ppu < 1 || ppu > 10000) {
-      if (!window.confirm(`Scale validation warning: 1 ${unit} = ${(1/ppu).toFixed(4)}px — this seems unusual. Proceed anyway?`)) return;
+    // Thresholds vary by unit: mm drawings can legitimately have ppu < 1
+    const minPpu = unit === 'mm' ? 0.0001 : unit === 'ft' ? 0.01 : 0.05;
+    if (ppu < minPpu || ppu > 100000) {
+      setCalibWarning(`Unusual scale detected: 1 pixel = ${(1/ppu).toFixed(6)} ${unit}. If this looks wrong, click Reset and re-pick your two points with the correct real dimension.`);
+    } else {
+      setCalibWarning('');
     }
     setPixPerUnit(ppu);
   }, [calibPoints, pixelDist, realDim, unit]);
@@ -418,7 +437,20 @@ export default function QSDrawingAnalyser() {
       setActiveTab('lengths');
     } catch (err) {
       clearInterval(progressTimer.current);
-      setAnalysisError(err.message || 'Analysis failed. Please try again.');
+      const raw = err.message || '';
+      let errorMsg;
+      if (raw.includes('401') || raw.toLowerCase().includes('authentication') || raw.toLowerCase().includes('api key') || raw.toLowerCase().includes('invalid x-api-key')) {
+        errorMsg = 'API key error — your ANTHROPIC_API_KEY is missing or invalid. Open the .env.local file in your app folder, paste your key (starts with sk-ant-...), save it, then stop and restart the server with npm run dev.';
+      } else if (raw.toLowerCase().includes('413') || raw.toLowerCase().includes('too large') || raw.toLowerCase().includes('payload')) {
+        errorMsg = 'The file is too large to process. Please try a smaller image or a compressed PDF (ideally under 4 MB).';
+      } else if (raw.toLowerCase().includes('network') || raw.toLowerCase().includes('econnrefused') || raw.toLowerCase().includes('failed to fetch')) {
+        errorMsg = 'Network error — could not reach the AI service. Check your internet connection and try again.';
+      } else if (raw.toLowerCase().includes('no construction elements') || raw.toLowerCase().includes('no elements')) {
+        errorMsg = 'No construction elements could be identified. Try a clearer drawing, or check the file opened correctly.';
+      } else {
+        errorMsg = raw || 'Analysis failed. Please try again.';
+      }
+      setAnalysisError(errorMsg);
       setScreen('upload');
     }
   }, [file, fileBase64, fileMediaType, projectName, scale, unit, pixPerUnit, exportSecs]);
@@ -856,7 +888,7 @@ Verify with a qualified QS before use in any tender or contract.</div>
                   <div style={{ padding:'14px 18px',display:'flex',flexDirection:'column',gap:10 }}>
                     <div style={{ display:'flex',gap:8,flexWrap:'wrap',alignItems:'center' }}>
                       <button className="qs-btn qs-btn-navy qs-btn-sm" disabled={calibMode}
-                        onClick={() => { setCalibMode(true); setCalibPoints([]); setPixelDist(null); setRealDim(''); setPixPerUnit(null); }}>
+                        onClick={() => { setCalibMode(true); setCalibPoints([]); setPixelDist(null); setRealDim(''); setPixPerUnit(null); setCalibWarning(''); }}>
                         📍 Pick 2 Points
                       </button>
                       {calibPoints.length>0 && <button className="qs-btn qs-btn-ghost qs-btn-sm" onClick={resetCalibration}>✕ Reset</button>}
@@ -874,6 +906,16 @@ Verify with a qualified QS before use in any tender or contract.</div>
                       </div>
                     )}
                     {pixPerUnit && <div className="fade-in" style={{ fontSize:12,color:'#059669',fontWeight:600 }}>✓ 1px = {(1/pixPerUnit).toFixed(5)} {unit}</div>}
+                    {calibWarning && (
+                      <div className="fade-in" style={{ padding:'8px 12px',background:'#fffbeb',border:'1px solid #f59e0b',borderRadius:6,fontSize:12,color:'#92400e',lineHeight:1.5 }}>
+                        ⚠ {calibWarning}
+                      </div>
+                    )}
+                    {fileIsPdf && pdfRenderFailed && (
+                      <div className="fade-in" style={{ padding:'8px 12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:6,fontSize:12,color:'#991b1b',lineHeight:1.5 }}>
+                        ⚠ PDF preview could not load — canvas calibration is unavailable for this file. You can still run the AI analysis without calibration using the declared scale below.
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
