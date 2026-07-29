@@ -152,12 +152,18 @@ export default function QSDrawingAnalyser() {
   // ── PDF render failure ──
   const [pdfRenderFailed, setPdfRenderFailed] = useState(false);
 
+  // ── Interactive canvas / split view ──
+  const [selectedElementIdx, setSelectedElementIdx] = useState(null);
+  const [showMeasurementLabels, setShowMeasurementLabels] = useState(true);
+
   // ── Refs ──
-  const calibCanvasRef   = useRef(null);
-  const calibImgRef      = useRef(null);
-  const overlayCanvasRef = useRef(null);
-  const fileInputRef     = useRef(null);
-  const progressTimer    = useRef(null);
+  const calibCanvasRef      = useRef(null);
+  const calibImgRef         = useRef(null);
+  const overlayCanvasRef    = useRef(null);
+  const fileInputRef        = useRef(null);
+  const progressTimer       = useRef(null);
+  const interactiveCanvasRef = useRef(null);
+  const listPanelRef        = useRef(null);
 
   // ─────────────────────────────────────────────
   // Boot: load company defaults from localStorage
@@ -616,6 +622,84 @@ export default function QSDrawingAnalyser() {
   useEffect(() => { if (showOverlay) drawOverlay(); }, [showOverlay, drawOverlay]);
 
   // ─────────────────────────────────────────────
+  // Interactive split-view canvas
+  // ─────────────────────────────────────────────
+  const drawInteractiveCanvas = useCallback(() => {
+    const canvas = interactiveCanvasRef.current;
+    const img    = calibImgRef.current;
+    if (!canvas || !img || !results) return;
+    const W = img.naturalWidth, H = img.naturalHeight;
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(img, 0, 0);
+
+    results.elements.forEach((el, idx) => {
+      const color   = el.colorHex || getElementColor(el.layerCode);
+      const isSel   = idx === selectedElementIdx;
+      const regions = el.regions || [];
+      const lw      = Math.max(2, W / 500);
+      const fs      = Math.max(12, Math.min(20, W / 65));
+
+      regions.forEach(r => {
+        const x = r.x * W, y = r.y * H, w = r.w * W, h = r.h * H;
+        ctx.fillStyle   = color + (isSel ? '55' : '28');
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = color + (isSel ? 'ff' : 'bb');
+        ctx.lineWidth   = isSel ? lw * 2.5 : lw;
+        ctx.setLineDash(isSel ? [] : [lw * 6, lw * 3]);
+        ctx.strokeRect(x, y, w, h);
+        ctx.setLineDash([]);
+
+        if (showMeasurementLabels) {
+          const label = `${fmt(el.totalQuantity)} ${el.unit}`;
+          ctx.font = `bold ${fs}px Arial, sans-serif`;
+          const tw = ctx.measureText(label).width + 10;
+          const th = fs + 8;
+          if (w >= tw + 4 && h >= th + 4) {
+            ctx.fillStyle = isSel ? color : 'rgba(13,27,62,0.78)';
+            ctx.fillRect(x + 4, y + 4, tw, th);
+            ctx.fillStyle = '#fff';
+            ctx.fillText(label, x + 9, y + 4 + fs);
+          }
+        }
+      });
+    });
+  }, [results, selectedElementIdx, showMeasurementLabels]);
+
+  useEffect(() => {
+    if (screen === 'results' && calibImgRef.current) drawInteractiveCanvas();
+  }, [screen, drawInteractiveCanvas]);
+
+  const handleInteractiveCanvasClick = useCallback((e) => {
+    const canvas = interactiveCanvasRef.current;
+    if (!canvas || !results) return;
+    const rect   = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const cx     = (e.clientX - rect.left) * scaleX;
+    const cy     = (e.clientY - rect.top)  * scaleY;
+    const W = canvas.width, H = canvas.height;
+
+    let found = null;
+    for (let idx = results.elements.length - 1; idx >= 0; idx--) {
+      for (const r of (results.elements[idx].regions || [])) {
+        if (cx >= r.x*W && cx <= (r.x+r.w)*W && cy >= r.y*H && cy <= (r.y+r.h)*H) {
+          found = idx; break;
+        }
+      }
+      if (found !== null) break;
+    }
+
+    setSelectedElementIdx(prev => prev === found ? null : found);
+
+    if (found !== null && listPanelRef.current) {
+      const row = listPanelRef.current.querySelector(`[data-el-idx="${found}"]`);
+      if (row) row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [results]);
+
+  // ─────────────────────────────────────────────
   // Grand total (AI + manual)
   // ─────────────────────────────────────────────
   const grandTotal = useMemo(() => {
@@ -1062,139 +1146,233 @@ Verify with a qualified QS before use in any tender or contract.</div>
   }
 
   // ─────────────────────────────────────────────
-  // SCREEN 3 — Results
+  // SCREEN 3 — Results (split-view)
   // ─────────────────────────────────────────────
   if (screen === 'results' && results) {
-    const tabs = [
-      { id:'lengths',  label:'📏 Total Lengths' },
-      { id:'rooms',    label:'🏠 Room Breakdown' },
-      { id:'takeoff',  label:'📋 Takeoff Table' },
-      { id:'rates',    label:'💷 Cost Rates' },
-      { id:'audit',    label:'📝 Audit Trail' },
+    const lpTabs = [
+      { id:'elements', label:'📏 Elements' },
+      { id:'takeoff',  label:'📋 Takeoff'  },
+      { id:'rooms',    label:'🏠 Rooms'    },
+      { id:'rates',    label:'💷 Rates'    },
+      { id:'audit',    label:'📝 Audit'    },
     ];
 
+    const ManualAddPanel = (
+      <div style={{ padding:'10px 14px' }}>
+        {!showAddManual ? (
+          <button className="qs-btn qs-btn-outline qs-btn-sm" style={{ width:'100%' }} onClick={()=>setShowAddManual(true)}>+ Add Manual Item</button>
+        ) : (
+          <div className="fade-in" style={{ background:'#fffbeb',border:'1.5px solid #fde68a',borderRadius:8,padding:12 }}>
+            <div style={{ fontWeight:700,fontSize:13,color:'#92400e',marginBottom:8 }}>Add Manual Measurement</div>
+            <input className="qs-input" type="text" placeholder="e.g. Extra wall — Room 3"
+              value={newManual.description} onChange={e=>setNewManual(p=>({...p,description:e.target.value}))} style={{ marginBottom:6 }} />
+            <div style={{ display:'flex',gap:6,marginBottom:8 }}>
+              <input className="qs-input" type="number" placeholder="Qty" value={newManual.quantity}
+                onChange={e=>setNewManual(p=>({...p,quantity:e.target.value}))} />
+              <select className="qs-input qs-select" value={newManual.unit}
+                onChange={e=>setNewManual(p=>({...p,unit:e.target.value}))} style={{ width:72 }}>
+                {MANUAL_UNITS.map(u=><option key={u}>{u}</option>)}
+              </select>
+            </div>
+            <div style={{ display:'flex',gap:6 }}>
+              <button className="qs-btn qs-btn-primary qs-btn-sm" style={{ flex:1 }}
+                disabled={!newManual.description.trim()||!newManual.quantity||parseFloat(newManual.quantity)<=0}
+                onClick={addManualItem}>Add</button>
+              <button className="qs-btn qs-btn-ghost qs-btn-sm"
+                onClick={()=>{setShowAddManual(false);setNewManual({description:'',quantity:'',unit:'m'});}}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+
     return (
-      <div style={{ minHeight:'100vh',display:'flex',flexDirection:'column',background:'#eef2ff' }}>
+      <div style={{ height:'100vh',display:'flex',flexDirection:'column',background:'#eef2ff',overflow:'hidden' }}>
+
         <AppHeader actions={
-          <div style={{ display:'flex',gap:8 }}>
-            <button className="qs-btn qs-btn-ghost qs-btn-sm" onClick={resetAll} style={{ color:'#93c5fd' }}>← New Analysis</button>
+          <div style={{ display:'flex',gap:6 }}>
+            <button className="qs-btn qs-btn-ghost qs-btn-sm" onClick={resetAll} style={{ color:'#93c5fd' }}>← New</button>
             <button className="qs-btn qs-btn-sm"
               onClick={handleSaveProject} disabled={isSaving}
-              style={{ background: savedProjectId ? '#10b981' : '#f59e0b', color: savedProjectId ? '#ffffff' : '#0d1b3e', border:'none' }}>
-              {isSaving ? '⏳ Saving…' : savedProjectId ? '✓ Saved' : '💾 Save Project'}
+              style={{ background:savedProjectId?'#10b981':'#f59e0b',color:savedProjectId?'#fff':'#0d1b3e',border:'none' }}>
+              {isSaving?'⏳':'💾'} {isSaving?'Saving…':savedProjectId?'Saved':'Save'}
             </button>
             <button className="qs-btn qs-btn-outline qs-btn-sm" onClick={exportCSV} style={{ borderColor:'#f59e0b',color:'#f59e0b',background:'transparent' }}>⬇ CSV</button>
             <button className="qs-btn qs-btn-primary qs-btn-sm" onClick={exportPDF}>📄 PDF</button>
           </div>
         } />
 
-        <main style={{ flex:1,maxWidth:1100,width:'100%',margin:'0 auto',padding:'22px 24px 48px' }}>
+        <div style={{ flex:1,display:'flex',overflow:'hidden' }}>
 
-          {/* Project info bar */}
-          <div className="fade-in-up qs-card" style={{ marginBottom:18,padding:'11px 20px',display:'flex',alignItems:'center',gap:20,flexWrap:'wrap' }}>
-            <div>
-              <div style={{ fontSize:11,color:'#64748b',fontWeight:600,textTransform:'uppercase',letterSpacing:'.06em' }}>Project</div>
-              <div style={{ fontSize:15,fontWeight:700,color:'#0d1b3e' }}>{projectName||'Unnamed Project'}</div>
-            </div>
-            {companyName && <div>
-              <div style={{ fontSize:11,color:'#64748b',fontWeight:600,textTransform:'uppercase',letterSpacing:'.06em' }}>Company</div>
-              <div style={{ fontSize:13,fontWeight:600,color:'#374151' }}>{companyName}</div>
-            </div>}
-            <div>
-              <div style={{ fontSize:11,color:'#64748b',fontWeight:600,textTransform:'uppercase',letterSpacing:'.06em' }}>Scale / Unit</div>
-              <div style={{ fontSize:13,fontWeight:600,color:'#374151' }}>{scale} · {unit}</div>
-            </div>
-            {manualItems.length > 0 && (
-              <span style={{ background:'#fef3c7',color:'#92400e',padding:'3px 10px',borderRadius:20,fontSize:12,fontWeight:700 }}>
-                +{manualItems.length} manual item{manualItems.length!==1?'s':''}
-              </span>
-            )}
-            <div style={{ marginLeft:'auto' }}>
-              <div style={{ background:'#0d1b3e',color:'#ffffff',padding:'6px 16px',borderRadius:20,fontSize:14,fontWeight:800 }}>
-                {grandTotal > 0 ? fmtCurrency(grandTotal) : '—'}
+          {/* ── LEFT PANEL ── */}
+          <div ref={listPanelRef} style={{ width:360,flexShrink:0,borderRight:'1px solid #e2e8f0',background:'#fff',display:'flex',flexDirection:'column',overflow:'hidden' }}>
+
+            {/* Project info */}
+            <div style={{ padding:'10px 14px',borderBottom:'1px solid #f1f5f9',background:'#f8f9fc',flexShrink:0 }}>
+              <div style={{ display:'flex',alignItems:'center',gap:8 }}>
+                <div style={{ flex:1,minWidth:0 }}>
+                  <div style={{ fontSize:14,fontWeight:700,color:'#0d1b3e',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap' }}>{projectName||'Unnamed Project'}</div>
+                  {companyName&&<div style={{ fontSize:11.5,color:'#64748b' }}>{companyName}</div>}
+                </div>
+                <div style={{ flexShrink:0,background:grandTotal>0?'#0d1b3e':'#e2e8f0',color:grandTotal>0?'#f59e0b':'#94a3b8',padding:'4px 10px',borderRadius:20,fontSize:13,fontWeight:800 }}>
+                  {grandTotal>0?fmtCurrency(grandTotal):'—'}
+                </div>
               </div>
+              <div style={{ fontSize:10.5,color:'#94a3b8',marginTop:3 }}>{scale} · {unit} · {results.elements.length} element{results.elements.length!==1?'s':''}{manualItems.length>0?` · +${manualItems.length} manual`:''}</div>
             </div>
-          </div>
 
-          {results.summary && (
-            <div className="fade-in-up qs-card" style={{ marginBottom:16,padding:'12px 18px',background:'#f0f4ff',borderColor:'#c7d2fe',animationDelay:'40ms' }}>
-              <p style={{ fontSize:13,color:'#374151',margin:0,lineHeight:1.6 }}>
-                <strong style={{ color:'#0d1b3e' }}>AI Summary: </strong>{results.summary}
-              </p>
-            </div>
-          )}
-
-          <div className="qs-card fade-in-up" style={{ padding:0,overflow:'hidden',animationDelay:'70ms' }}>
-
-            {/* Tabs */}
-            <div style={{ display:'flex',borderBottom:'1px solid #e8ecf4',overflowX:'auto',background:'#f8f9fc' }}>
-              {tabs.map(t => (
-                <button key={t.id} className={`qs-tab ${activeTab===t.id?'active':''}`} onClick={()=>setActiveTab(t.id)}>{t.label}</button>
+            {/* Tab bar */}
+            <div style={{ display:'flex',borderBottom:'1px solid #e8ecf4',background:'#f8f9fc',overflowX:'auto',flexShrink:0 }}>
+              {lpTabs.map(t=>(
+                <button key={t.id} onClick={()=>setActiveTab(t.id)}
+                  style={{ padding:'7px 10px',fontSize:11,fontWeight:600,border:'none',background:'transparent',color:activeTab===t.id?'#0d1b3e':'#64748b',borderBottom:`2px solid ${activeTab===t.id?'#f59e0b':'transparent'}`,cursor:'pointer',whiteSpace:'nowrap',transition:'all 0.15s',flexShrink:0 }}>
+                  {t.label}
+                </button>
               ))}
             </div>
 
-            <div style={{ padding:22 }}>
+            {/* Scrollable content */}
+            <div style={{ flex:1,overflowY:'auto' }}>
 
-              {/* TAB: Total Lengths */}
-              {activeTab==='lengths' && (
-                <div className="fade-in">
-                  {results.elements.length===0 ? <EmptyState message="No elements detected." /> : (
-                    <>
-                      {canvasSourceUrl && (
-                        <div style={{ marginBottom:18,position:'relative',borderRadius:8,overflow:'hidden',background:'#1a1a2e' }}>
-                          <img src={canvasSourceUrl} alt="Drawing" style={{ width:'100%',display:'block',maxHeight:280,objectFit:'contain' }} />
-                          {showOverlay && <canvas ref={overlayCanvasRef} style={{ position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none' }} />}
-                          <button className="overlay-toggle" onClick={()=>setShowOverlay(v=>!v)}>
-                            {showOverlay?'🔍 Hide Overlay':'🔍 Show Overlay'}
-                          </button>
+              {/* ELEMENTS TAB */}
+              {activeTab==='elements'&&(
+                <div>
+                  {results.summary&&(
+                    <div style={{ padding:'10px 14px',background:'#f0f4ff',borderBottom:'1px solid #e8ecf4',fontSize:12,color:'#374151',lineHeight:1.6 }}>
+                      <strong style={{ color:'#0d1b3e' }}>AI: </strong>{results.summary}
+                    </div>
+                  )}
+                  {results.elements.length===0&&<EmptyState message="No elements detected." />}
+                  {results.elements.map((el,idx)=>{
+                    const color=el.colorHex||getElementColor(el.layerCode);
+                    const isSel=idx===selectedElementIdx;
+                    return (
+                      <div key={idx} data-el-idx={idx}
+                        onClick={()=>setSelectedElementIdx(p=>p===idx?null:idx)}
+                        style={{ padding:'11px 14px',borderLeft:`4px solid ${color}`,borderBottom:'1px solid #f1f5f9',background:isSel?'#f0f4ff':'#fff',cursor:'pointer',transition:'background 0.15s' }}>
+                        <div style={{ display:'flex',alignItems:'flex-start',gap:6,marginBottom:4 }}>
+                          <div style={{ flex:1 }}>
+                            <div style={{ fontSize:13,fontWeight:700,color:'#0d1b3e',lineHeight:1.3 }}>{el.elementType}</div>
+                            <div style={{ fontSize:10.5,color:'#64748b',fontFamily:'JetBrains Mono,monospace' }}>{el.layerCode}</div>
+                          </div>
+                          {confidenceBadge(el.confidence)}
                         </div>
-                      )}
-                      <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(270px,1fr))',gap:13 }}>
-                        {results.elements.map((el,i) => {
-                          const color = el.colorHex||getElementColor(el.layerCode);
-                          return (
-                            <div key={i} style={{ border:'1.5px solid #e8ecf4',borderRadius:10,padding:'15px 17px',borderLeft:`4px solid ${color}`,background:'#ffffff' }}>
-                              <div style={{ display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:7 }}>
-                                <div style={{ display:'flex',alignItems:'center',gap:7 }}>
-                                  <div style={{ width:12,height:12,borderRadius:3,background:color,flexShrink:0 }} />
-                                  <span style={{ fontSize:13,fontWeight:700,color:'#0d1b3e' }}>{el.elementType}</span>
-                                </div>
-                                {confidenceBadge(el.confidence)}
+                        <div style={{ fontSize:24,fontWeight:800,color:isSel?color:'#0d1b3e',lineHeight:1.1 }}>
+                          {fmt(el.totalQuantity)}<span style={{ fontSize:12,fontWeight:500,color:'#64748b',marginLeft:4 }}>{el.unit}</span>
+                        </div>
+                        {el.specNote&&<div style={{ fontSize:11,color:'#64748b',marginTop:4,fontStyle:'italic' }}>{el.specNote}</div>}
+                        {isSel&&(el.regions||[]).length>0&&<div style={{ fontSize:10.5,color:color,marginTop:4,fontWeight:600 }}>↗ Highlighted on drawing →</div>}
+                      </div>
+                    );
+                  })}
+
+                  {manualItems.length>0&&(
+                    <>
+                      <div style={{ padding:'6px 14px',background:'#fef3c7',fontSize:10.5,fontWeight:700,color:'#92400e',textTransform:'uppercase',letterSpacing:'.06em' }}>Manual Items</div>
+                      {manualItems.map(item=>(
+                        <div key={item.id} style={{ padding:'11px 14px',borderLeft:'4px solid #d97706',borderBottom:'1px solid #f1f5f9',background:'#fffbeb' }}>
+                          <div style={{ display:'flex',alignItems:'center',gap:6,marginBottom:4 }}>
+                            <span style={{ background:'#fef3c7',color:'#92400e',fontSize:10,fontWeight:700,padding:'1px 5px',borderRadius:3 }}>MANUAL</span>
+                            <span style={{ fontSize:13,fontWeight:700,color:'#0d1b3e',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap' }}>{item.description}</span>
+                            <button style={{ background:'none',border:'none',color:'#dc2626',cursor:'pointer',padding:'2px 4px',fontSize:14,lineHeight:1,flexShrink:0 }}
+                              onClick={e=>{e.stopPropagation();removeManualItem(item.id);}}>✕</button>
+                          </div>
+                          <div style={{ fontSize:24,fontWeight:800,color:'#d97706',lineHeight:1.1 }}>
+                            {fmt(item.quantity)}<span style={{ fontSize:12,fontWeight:500,color:'#64748b',marginLeft:4 }}>{item.unit}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  {ManualAddPanel}
+
+                  <div style={{ margin:'4px 14px 14px',padding:'10px 12px',background:'#fffbeb',border:'1px solid #fde68a',borderRadius:7,fontSize:11.5,color:'#78350f',lineHeight:1.6 }}>
+                    <strong>⚠ QS Notice:</strong> AI measurements are estimates. Verify with a qualified QS before use in any tender or contract.
+                  </div>
+                </div>
+              )}
+
+              {/* TAKEOFF TAB */}
+              {activeTab==='takeoff'&&(
+                <div>
+                  {results.takeoff.length===0&&manualItems.length===0?<EmptyState message="No takeoff items." />:(
+                    <>
+                      {results.takeoff.map((item,i)=>{
+                        const key=getRateKey(item),rate=parseFloat(rates[key])||0,total=item.quantity*rate;
+                        return (
+                          <div key={`ai-${i}`} style={{ padding:'9px 14px',borderBottom:'1px solid #f1f5f9' }}>
+                            <div style={{ fontSize:12.5,fontWeight:600,color:'#0d1b3e',marginBottom:5,lineHeight:1.3 }}>{item.description}</div>
+                            <div style={{ display:'flex',alignItems:'center',gap:6,flexWrap:'wrap' }}>
+                              <span style={{ fontSize:12,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:'#374151',background:'#f0f4ff',padding:'2px 8px',borderRadius:5 }}>{fmt(item.quantity)} {item.unit}</span>
+                              <span style={{ color:'#94a3b8',fontSize:11 }}>×</span>
+                              <div style={{ display:'flex',alignItems:'center',gap:2 }}>
+                                <span style={{ color:'#64748b',fontSize:12 }}>£</span>
+                                <input type="number" min="0" step="0.01" placeholder="0.00" value={rates[key]??''} onChange={e=>setRates(p=>({...p,[key]:e.target.value}))} className="rate-input" style={{ width:80 }} />
                               </div>
-                              <div style={{ fontSize:11,color:'#64748b',fontFamily:'JetBrains Mono,monospace',marginBottom:8 }}>{el.layerCode}</div>
-                              <div style={{ fontSize:24,fontWeight:800,color:'#0d1b3e',marginBottom:3 }}>
-                                {fmt(el.totalQuantity)}<span style={{ fontSize:12,color:'#64748b',marginLeft:4 }}>{el.unit}</span>
-                              </div>
-                              {el.description && <div style={{ fontSize:11.5,color:'#64748b',marginTop:5,lineHeight:1.5 }}>{el.description}</div>}
-                              {el.specNote && <div style={{ fontSize:11,color:'#374151',marginTop:7,background:'#f8f9fc',borderRadius:5,padding:'4px 8px',fontStyle:'italic' }}>Spec: {el.specNote}</div>}
+                              <span style={{ marginLeft:'auto',fontSize:13,fontWeight:700,color:rate>0?'#059669':'#94a3b8' }}>{rate>0?fmtCurrency(total):'—'}</span>
                             </div>
-                          );
-                        })}
+                            {item.comments&&<div style={{ fontSize:10.5,color:'#94a3b8',marginTop:3 }}>{item.comments}</div>}
+                          </div>
+                        );
+                      })}
+                      {manualItems.map(item=>{
+                        const key=`manual__${item.id}`,rate=parseFloat(rates[key])||0,total=item.quantity*rate;
+                        return (
+                          <div key={`m-${item.id}`} style={{ padding:'9px 14px',borderBottom:'1px solid #f1f5f9',background:'#fffbeb' }}>
+                            <div style={{ display:'flex',alignItems:'center',gap:6,marginBottom:5 }}>
+                              <span style={{ background:'#fef3c7',color:'#92400e',fontSize:10,fontWeight:700,padding:'1px 5px',borderRadius:3 }}>MANUAL</span>
+                              <span style={{ fontSize:12.5,fontWeight:600,color:'#0d1b3e',flex:1 }}>{item.description}</span>
+                              <button className="qs-btn qs-btn-ghost qs-btn-sm" style={{ color:'#dc2626',padding:'1px 5px',fontSize:11 }}
+                                onClick={()=>removeManualItem(item.id)}>✕</button>
+                            </div>
+                            <div style={{ display:'flex',alignItems:'center',gap:6,flexWrap:'wrap' }}>
+                              <span style={{ fontSize:12,fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:'#374151',background:'#fef3c7',padding:'2px 8px',borderRadius:5 }}>{fmt(item.quantity)} {item.unit}</span>
+                              <span style={{ color:'#94a3b8',fontSize:11 }}>×</span>
+                              <div style={{ display:'flex',alignItems:'center',gap:2 }}>
+                                <span style={{ color:'#64748b',fontSize:12 }}>£</span>
+                                <input type="number" min="0" step="0.01" placeholder="0.00" value={rates[key]??''} onChange={e=>setRates(p=>({...p,[key]:e.target.value}))} className="rate-input" style={{ width:80 }} />
+                              </div>
+                              <span style={{ marginLeft:'auto',fontSize:13,fontWeight:700,color:rate>0?'#059669':'#94a3b8' }}>{rate>0?fmtCurrency(total):'—'}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div style={{ padding:'12px 14px',background:'#0d1b3e' }}>
+                        <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center' }}>
+                          <span style={{ fontSize:13,fontWeight:700,color:'#fff' }}>Grand Total</span>
+                          <span style={{ fontSize:18,fontWeight:800,color:'#f59e0b' }}>{grandTotal>0?fmtCurrency(grandTotal):'—'}</span>
+                        </div>
+                      </div>
+                      {ManualAddPanel}
+                      <div style={{ margin:'4px 14px 14px',padding:'10px 12px',background:'#f0f4ff',borderRadius:7 }}>
+                        <div style={{ fontSize:12,fontWeight:700,color:'#0d1b3e',marginBottom:5 }}>Contractor Package</div>
+                        <button className="qs-btn qs-btn-navy qs-btn-sm" style={{ width:'100%' }} onClick={exportByTrade}>⬇ Export by Trade (CSV)</button>
                       </div>
                     </>
                   )}
                 </div>
               )}
 
-              {/* TAB: Room Breakdown */}
-              {activeTab==='rooms' && (
-                <div className="fade-in">
-                  {(!results.rooms||results.rooms.length===0) ? <EmptyState message="No rooms were identified." /> : (
-                    <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(250px,1fr))',gap:13 }}>
-                      {results.rooms.map((room,i) => (
-                        <div key={i} style={{ border:'1.5px solid #e8ecf4',borderRadius:10,padding:'16px 18px',background:'#ffffff' }}>
-                          <div style={{ fontSize:14.5,fontWeight:700,color:'#0d1b3e',marginBottom:11 }}>{room.name}</div>
-                          <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:11 }}>
-                            {[{label:'FLOOR AREA',val:room.area,suf:'m²'},{label:'PERIMETER',val:room.perimeter,suf:'m'}].map(s => (
-                              <div key={s.label} style={{ background:'#f0f4ff',borderRadius:7,padding:'9px 12px' }}>
+              {/* ROOMS TAB */}
+              {activeTab==='rooms'&&(
+                <div style={{ padding:'12px 14px' }}>
+                  {(!results.rooms||results.rooms.length===0)?<EmptyState message="No rooms identified." />:(
+                    <div style={{ display:'flex',flexDirection:'column',gap:10 }}>
+                      {results.rooms.map((room,i)=>(
+                        <div key={i} style={{ border:'1.5px solid #e8ecf4',borderRadius:9,padding:'12px 14px',background:'#fff' }}>
+                          <div style={{ fontSize:13.5,fontWeight:700,color:'#0d1b3e',marginBottom:8 }}>{room.name}</div>
+                          <div style={{ display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:room.elements?.length>0?8:0 }}>
+                            {[{label:'FLOOR AREA',val:room.area,suf:'m²'},{label:'PERIMETER',val:room.perimeter,suf:'m'}].map(s=>(
+                              <div key={s.label} style={{ background:'#f0f4ff',borderRadius:6,padding:'8px 10px' }}>
                                 <div style={{ fontSize:10,color:'#64748b',fontWeight:700,marginBottom:2 }}>{s.label}</div>
                                 <div style={{ fontSize:18,fontWeight:800,color:'#0d1b3e' }}>{fmt(s.val)}<span style={{ fontSize:10,color:'#64748b',marginLeft:2 }}>{s.suf}</span></div>
                               </div>
                             ))}
                           </div>
-                          {room.elements?.length>0 && (
+                          {room.elements?.length>0&&(
                             <div style={{ display:'flex',gap:5,flexWrap:'wrap' }}>
-                              {room.elements.map((code,j) => (
+                              {room.elements.map((code,j)=>(
                                 <span key={j} style={{ background:'#f1f5f9',color:'#374151',padding:'2px 7px',borderRadius:5,fontSize:10.5,fontFamily:'JetBrains Mono,monospace',borderLeft:`3px solid ${getElementColor(code)}` }}>{code}</span>
                               ))}
                             </div>
@@ -1206,162 +1384,37 @@ Verify with a qualified QS before use in any tender or contract.</div>
                 </div>
               )}
 
-              {/* TAB: Takeoff Table */}
-              {activeTab==='takeoff' && (
-                <div className="fade-in">
-                  {results.takeoff.length===0&&manualItems.length===0 ? <EmptyState message="No takeoff items." /> : (
-                    <>
-                      <div style={{ overflowX:'auto' }}>
-                        <table className="qs-table">
-                          <thead>
-                            <tr>
-                              <th style={{ width:48 }}>Ref</th><th>Description</th>
-                              <th style={{ textAlign:'right',width:86 }}>Qty</th><th style={{ width:58 }}>Unit</th>
-                              <th style={{ width:108 }}>Rate £</th><th style={{ textAlign:'right',width:108 }}>Total £</th>
-                              <th className="hide-mobile">Comments</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {/* AI items */}
-                            {results.takeoff.map((item,i) => {
-                              const key=getRateKey(item), rate=parseFloat(rates[key])||0, total=item.quantity*rate;
-                              return (
-                                <tr key={`ai-${i}`}>
-                                  <td style={{ color:'#64748b',fontWeight:700 }}>{item.ref??i+1}</td>
-                                  <td><span style={{ fontSize:13.5,fontWeight:600,color:'#0d1b3e' }}>{item.description}</span></td>
-                                  <td style={{ textAlign:'right',fontFamily:'JetBrains Mono,monospace',fontWeight:600 }}>{fmt(item.quantity)}</td>
-                                  <td style={{ color:'#64748b',fontWeight:600 }}>{item.unit}</td>
-                                  <td><div style={{ display:'flex',alignItems:'center',gap:3 }}><span style={{ color:'#64748b',fontSize:12 }}>£</span>
-                                    <input type="number" min="0" step="0.01" placeholder="0.00" value={rates[key]??''} onChange={e=>setRates(prev=>({...prev,[key]:e.target.value}))} className="rate-input" /></div></td>
-                                  <td style={{ textAlign:'right',fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:rate>0?'#0d1b3e':'#94a3b8' }}>{rate>0?fmtCurrency(total):'—'}</td>
-                                  <td className="hide-mobile" style={{ fontSize:11.5,color:'#64748b' }}>{item.comments}</td>
-                                </tr>
-                              );
-                            })}
-                            {/* Manual items */}
-                            {manualItems.map((item,i) => {
-                              const key=`manual__${item.id}`, rate=parseFloat(rates[key])||0, total=item.quantity*rate;
-                              return (
-                                <tr key={`m-${item.id}`} style={{ background:'#fffbeb' }}>
-                                  <td style={{ color:'#d97706',fontWeight:700 }}>{results.takeoff.length+i+1}</td>
-                                  <td>
-                                    <div style={{ display:'flex',alignItems:'center',gap:6 }}>
-                                      <span style={{ background:'#fef3c7',color:'#92400e',fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:4 }}>MANUAL</span>
-                                      <span style={{ fontSize:13,fontWeight:600,color:'#0d1b3e' }}>{item.description}</span>
-                                    </div>
-                                  </td>
-                                  <td style={{ textAlign:'right',fontFamily:'JetBrains Mono,monospace',fontWeight:600 }}>{fmt(item.quantity)}</td>
-                                  <td style={{ color:'#64748b',fontWeight:600 }}>{item.unit}</td>
-                                  <td><div style={{ display:'flex',alignItems:'center',gap:3 }}><span style={{ color:'#64748b',fontSize:12 }}>£</span>
-                                    <input type="number" min="0" step="0.01" placeholder="0.00" value={rates[key]??''} onChange={e=>setRates(prev=>({...prev,[key]:e.target.value}))} className="rate-input" /></div></td>
-                                  <td style={{ textAlign:'right',fontFamily:'JetBrains Mono,monospace',fontWeight:700,color:rate>0?'#0d1b3e':'#94a3b8' }}>{rate>0?fmtCurrency(total):'—'}</td>
-                                  <td className="hide-mobile">
-                                    <button className="qs-btn qs-btn-ghost qs-btn-sm" style={{ color:'#dc2626',padding:'3px 8px' }} onClick={()=>removeManualItem(item.id)}>✕</button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                            {/* Total row */}
-                            <tr className="total-row">
-                              <td colSpan={5} style={{ textAlign:'right',fontSize:14 }}><strong>Grand Total</strong></td>
-                              <td style={{ textAlign:'right',fontFamily:'JetBrains Mono,monospace',fontSize:16 }}><strong>{grandTotal>0?fmtCurrency(grandTotal):'—'}</strong></td>
-                              <td className="hide-mobile" />
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-
-                      {/* Add manual item */}
-                      <div style={{ marginTop:16 }}>
-                        {!showAddManual ? (
-                          <button className="qs-btn qs-btn-outline qs-btn-sm" onClick={()=>setShowAddManual(true)}>
-                            + Add Manual Item
-                          </button>
-                        ) : (
-                          <div className="fade-in" style={{ padding:'16px',background:'#fffbeb',borderRadius:10,border:'1.5px solid #fde68a',marginTop:8 }}>
-                            <div style={{ fontSize:13.5,fontWeight:700,color:'#92400e',marginBottom:12 }}>Add Manual Measurement</div>
-                            <div style={{ display:'flex',gap:8,flexWrap:'wrap',alignItems:'flex-end' }}>
-                              <div style={{ flex:'1 1 200px' }}>
-                                <label className="qs-label">Description</label>
-                                <input className="qs-input" type="text" placeholder="e.g. Extra wall section — Room 3"
-                                  value={newManual.description} onChange={e=>setNewManual(prev=>({...prev,description:e.target.value}))} />
-                              </div>
-                              <div style={{ width:90 }}>
-                                <label className="qs-label">Quantity</label>
-                                <input className="qs-input" type="number" min="0" step="any" placeholder="0.00"
-                                  value={newManual.quantity} onChange={e=>setNewManual(prev=>({...prev,quantity:e.target.value}))} />
-                              </div>
-                              <div style={{ width:90 }}>
-                                <label className="qs-label">Unit</label>
-                                <select className="qs-input qs-select" value={newManual.unit} onChange={e=>setNewManual(prev=>({...prev,unit:e.target.value}))}>
-                                  {MANUAL_UNITS.map(u=><option key={u}>{u}</option>)}
-                                </select>
-                              </div>
-                              <button className="qs-btn qs-btn-primary qs-btn-sm"
-                                disabled={!newManual.description.trim()||!newManual.quantity||parseFloat(newManual.quantity)<=0}
-                                onClick={addManualItem}>Add</button>
-                              <button className="qs-btn qs-btn-ghost qs-btn-sm" onClick={()=>{setShowAddManual(false);setNewManual({description:'',quantity:'',unit:'m'});}}>Cancel</button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Contractor export */}
-                      <div style={{ marginTop:16,padding:'13px 16px',background:'#f0f4ff',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10 }}>
-                        <div>
-                          <div style={{ fontSize:13,fontWeight:700,color:'#0d1b3e' }}>Contractor Package Export</div>
-                          <div style={{ fontSize:12,color:'#64748b' }}>Grouped by trade — separate section per element type</div>
-                        </div>
-                        <button className="qs-btn qs-btn-navy qs-btn-sm" onClick={exportByTrade}>⬇ Export by Trade</button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* TAB: Cost Rates */}
-              {activeTab==='rates' && (
-                <div className="fade-in">
-                  {/* Grand total banner */}
-                  <div style={{ background:'#0d1b3e',borderRadius:10,padding:'16px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20,flexWrap:'wrap',gap:12 }}>
-                    <div>
-                      <div style={{ fontSize:11.5,color:'#93c5fd',fontWeight:600,marginBottom:2 }}>TOTAL COST ESTIMATE</div>
-                      <div style={{ fontSize:28,fontWeight:800,color:'#f59e0b' }}>{grandTotal>0?fmtCurrency(grandTotal):'£—'}</div>
+              {/* RATES TAB */}
+              {activeTab==='rates'&&(
+                <div>
+                  <div style={{ padding:'12px 14px',background:'#0d1b3e' }}>
+                    <div style={{ fontSize:11,color:'#93c5fd',fontWeight:600,marginBottom:2 }}>TOTAL ESTIMATE</div>
+                    <div style={{ fontSize:26,fontWeight:800,color:'#f59e0b',marginBottom:10 }}>{grandTotal>0?fmtCurrency(grandTotal):'£—'}</div>
+                    <div style={{ display:'flex',gap:6 }}>
+                      <button className="qs-btn qs-btn-sm" style={{ flex:1,background:'rgba(255,255,255,0.12)',color:'#fff',border:'none',fontSize:11 }} onClick={handleLoadRates}>📂 Load Library</button>
+                      <button className="qs-btn qs-btn-sm" style={{ flex:1,background:'#f59e0b',color:'#0d1b3e',border:'none',fontSize:11 }} onClick={handleSaveRates}>💾 Save Library</button>
                     </div>
-                    {/* Rate library buttons */}
-                    <div style={{ display:'flex',gap:8 }}>
-                      <button className="qs-btn qs-btn-sm" style={{ background:'rgba(255,255,255,0.12)',color:'#fff',border:'none' }} onClick={handleLoadRates}>
-                        📂 Load Rate Library
-                      </button>
-                      <button className="qs-btn qs-btn-sm" style={{ background:'#f59e0b',color:'#0d1b3e',border:'none' }} onClick={handleSaveRates}>
-                        💾 Save to Library
-                      </button>
-                    </div>
+                    {rateLibToast&&(
+                      <div style={{ marginTop:8,padding:'6px 10px',borderRadius:5,background:'rgba(255,255,255,0.1)',fontSize:11.5,fontWeight:600,color:'#fff' }}>
+                        {rateLibToast==='saved'?'✓ Saved to rate library':rateLibToast==='loaded'?'✓ Rates loaded':'Library is empty — enter rates and save first.'}
+                      </div>
+                    )}
                   </div>
-
-                  {rateLibToast && (
-                    <div className="fade-in" style={{ marginBottom:14,padding:'10px 14px',borderRadius:7,background:rateLibToast==='saved'?'#d1fae5':rateLibToast==='loaded'?'#dbeafe':'#fef3c7',fontSize:13,fontWeight:600,color:rateLibToast==='saved'?'#065f46':rateLibToast==='loaded'?'#1e40af':'#92400e' }}>
-                      {rateLibToast==='saved'?'✓ Rates saved to your library — they will pre-fill on your next project.':rateLibToast==='loaded'?'✓ Saved rates loaded — blanks filled from your library.':'Your rate library is empty. Enter rates above and click Save to Library.'}
-                    </div>
-                  )}
-
-                  <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:12 }}>
-                    {[...results.takeoff, ...manualItems.map(item=>({...item,elementType:'Manual Item',layerCode:'MANUAL'}))].map((item,i) => {
-                      const key = item.id ? `manual__${item.id}` : getRateKey(item);
-                      const rate=parseFloat(rates[key])||0, total=item.quantity*rate;
+                  <div style={{ padding:'12px 14px',display:'flex',flexDirection:'column',gap:10 }}>
+                    {[...results.takeoff,...manualItems.map(item=>({...item,elementType:'Manual Item',layerCode:'MANUAL'}))].map((item,i)=>{
+                      const key=item.id?`manual__${item.id}`:getRateKey(item);
+                      const rate=parseFloat(rates[key])||0,total=item.quantity*rate;
                       const color=getElementColor(item.layerCode);
                       return (
-                        <div key={i} style={{ border:'1.5px solid #e8ecf4',borderRadius:10,padding:'14px 16px',background:'#ffffff',borderLeft:`4px solid ${color}` }}>
-                          <div style={{ fontSize:13,fontWeight:700,color:'#0d1b3e',marginBottom:3 }}>{item.elementType}</div>
-                          <div style={{ fontSize:10.5,color:'#64748b',fontFamily:'JetBrains Mono,monospace',marginBottom:10 }}>{item.layerCode}</div>
-                          <div style={{ display:'flex',alignItems:'center',gap:8,marginBottom:7 }}>
-                            <div style={{ fontSize:14,fontWeight:700,color:'#0d1b3e',padding:'3px 10px',background:'#f0f4ff',borderRadius:5 }}>
-                              {fmt(item.quantity)}<span style={{ fontSize:10,color:'#64748b',marginLeft:2 }}>{item.unit}</span>
-                            </div>
+                        <div key={i} style={{ border:'1.5px solid #e8ecf4',borderRadius:9,padding:'12px 14px',borderLeft:`4px solid ${color}`,background:'#fff' }}>
+                          <div style={{ fontSize:12.5,fontWeight:700,color:'#0d1b3e',marginBottom:2 }}>{item.elementType||item.description}</div>
+                          <div style={{ fontSize:10.5,color:'#64748b',fontFamily:'JetBrains Mono,monospace',marginBottom:8 }}>{item.layerCode}</div>
+                          <div style={{ display:'flex',alignItems:'center',gap:6,marginBottom:6,flexWrap:'wrap' }}>
+                            <span style={{ fontSize:13,fontWeight:700,color:'#0d1b3e',background:'#f0f4ff',padding:'2px 8px',borderRadius:5 }}>{fmt(item.quantity)}<span style={{ fontSize:10,color:'#64748b',marginLeft:2 }}>{item.unit}</span></span>
                             <span style={{ color:'#64748b' }}>×</span>
-                            <div style={{ display:'flex',alignItems:'center',gap:3 }}>
+                            <div style={{ display:'flex',alignItems:'center',gap:2 }}>
                               <span style={{ color:'#64748b',fontSize:12 }}>£</span>
-                              <input type="number" min="0" step="0.01" placeholder="rate" value={rates[key]??''} onChange={e=>setRates(prev=>({...prev,[key]:e.target.value}))} className="rate-input" />
+                              <input type="number" min="0" step="0.01" placeholder="rate" value={rates[key]??''} onChange={e=>setRates(p=>({...p,[key]:e.target.value}))} className="rate-input" />
                             </div>
                           </div>
                           <div style={{ fontSize:17,fontWeight:800,color:rate>0?'#0d1b3e':'#94a3b8' }}>{rate>0?fmtCurrency(total):'—'}</div>
@@ -1372,23 +1425,21 @@ Verify with a qualified QS before use in any tender or contract.</div>
                 </div>
               )}
 
-              {/* TAB: Audit Trail */}
-              {activeTab==='audit' && (
-                <div className="fade-in">
-                  {auditLog.length===0 ? (
-                    <EmptyState message="No audit events yet. Run an analysis and save the project to see the trail here." />
-                  ) : (
-                    <div style={{ display:'flex',flexDirection:'column',gap:1 }}>
-                      {[...auditLog].reverse().map((entry) => (
-                        <div key={entry.id} style={{ display:'flex',gap:14,padding:'11px 14px',borderRadius:8,background:'#f8f9fc',marginBottom:4 }}>
-                          <div style={{ fontSize:11,color:'#94a3b8',whiteSpace:'nowrap',paddingTop:2 }}>
+              {/* AUDIT TAB */}
+              {activeTab==='audit'&&(
+                <div style={{ padding:'10px 14px' }}>
+                  {auditLog.length===0?<EmptyState message="No audit events yet." />:(
+                    <div style={{ display:'flex',flexDirection:'column',gap:4 }}>
+                      {[...auditLog].reverse().map(entry=>(
+                        <div key={entry.id} style={{ padding:'9px 12px',borderRadius:7,background:'#f8f9fc' }}>
+                          <div style={{ fontSize:10.5,color:'#94a3b8',marginBottom:3 }}>
                             {new Date(entry.timestamp).toLocaleString('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}
                           </div>
-                          <div>
-                            <span style={{ display:'inline-block',background:entry.action==='saved'?'#d1fae5':entry.action==='analysed'?'#dbeafe':entry.action==='manual_added'?'#fef3c7':'#f3f4f6',color:entry.action==='saved'?'#065f46':entry.action==='analysed'?'#1e40af':entry.action==='manual_added'?'#92400e':'#374151',fontSize:10.5,fontWeight:700,padding:'2px 7px',borderRadius:4,marginRight:8,textTransform:'uppercase' }}>
+                          <div style={{ display:'flex',alignItems:'flex-start',gap:6 }}>
+                            <span style={{ display:'inline-block',background:entry.action==='saved'?'#d1fae5':entry.action==='analysed'?'#dbeafe':'#f3f4f6',color:entry.action==='saved'?'#065f46':entry.action==='analysed'?'#1e40af':'#374151',fontSize:10,fontWeight:700,padding:'2px 6px',borderRadius:3,flexShrink:0,textTransform:'uppercase' }}>
                               {entry.action.replace('_',' ')}
                             </span>
-                            <span style={{ fontSize:13,color:'#374151' }}>{entry.details}</span>
+                            <span style={{ fontSize:12,color:'#374151',lineHeight:1.4 }}>{entry.details}</span>
                           </div>
                         </div>
                       ))}
@@ -1396,41 +1447,69 @@ Verify with a qualified QS before use in any tender or contract.</div>
                   )}
                 </div>
               )}
+            </div>
 
+            {/* Panel footer */}
+            <div style={{ padding:'10px 14px',borderTop:'1px solid #e2e8f0',background:'#f8f9fc',display:'flex',gap:6,flexShrink:0 }}>
+              <button className="qs-btn qs-btn-sm" style={{ flex:1,background:'#f59e0b',color:'#0d1b3e',border:'none',fontSize:11.5 }} onClick={exportCSV}>⬇ CSV</button>
+              <button className="qs-btn qs-btn-primary qs-btn-sm" style={{ flex:1,fontSize:11.5 }} onClick={exportPDF}>📄 PDF</button>
+              <button className="qs-btn qs-btn-sm" style={{ flex:1,background:savedProjectId?'#10b981':'#0d1b3e',color:'#fff',border:'none',fontSize:11.5 }}
+                onClick={handleSaveProject} disabled={isSaving}>
+                {isSaving?'⏳':savedProjectId?'✓ Saved':'💾 Save'}
+              </button>
             </div>
           </div>
 
-          {/* QS Accuracy Notice */}
-          <div className="qs-card fade-in-up" style={{ marginTop:18,padding:'14px 18px',background:'#fffbeb',borderColor:'#fde68a',animationDelay:'100ms' }}>
-            <div style={{ display:'flex',gap:10,alignItems:'flex-start' }}>
-              <span style={{ fontSize:18,flexShrink:0 }}>⚠️</span>
-              <div>
-                <div style={{ fontSize:13,fontWeight:700,color:'#92400e',marginBottom:3 }}>QS Accuracy Notice</div>
-                <p style={{ fontSize:12,color:'#78350f',margin:0,lineHeight:1.7 }}>
-                  AI measurements are estimates based on visual drawing analysis. Verify with a qualified Quantity Surveyor
-                  before use in any tender, contract, or formal cost plan. Confidence ratings reflect AI certainty.
-                  Scale calibration accuracy directly affects all computed quantities.
-                </p>
+          {/* ── RIGHT PANEL — Interactive canvas ── */}
+          <div style={{ flex:1,background:'#111827',position:'relative',display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden' }}>
+            {canvasSourceUrl ? (
+              <>
+                {/* Toolbar */}
+                <div style={{ position:'absolute',top:12,left:12,zIndex:10,display:'flex',gap:8,flexWrap:'wrap' }}>
+                  <button
+                    style={{ background:'rgba(13,27,62,0.88)',backdropFilter:'blur(4px)',color:'#fff',border:'1px solid rgba(255,255,255,0.15)',borderRadius:7,padding:'6px 12px',fontSize:12,cursor:'pointer',fontWeight:600 }}
+                    onClick={()=>setShowMeasurementLabels(v=>!v)}>
+                    🏷 Labels: {showMeasurementLabels?'ON':'OFF'}
+                  </button>
+                  {selectedElementIdx!==null&&(
+                    <div style={{ background:'rgba(245,158,11,0.97)',color:'#0d1b3e',borderRadius:7,padding:'6px 12px',fontSize:12,fontWeight:700,display:'flex',alignItems:'center',gap:8 }}>
+                      <div style={{ width:8,height:8,borderRadius:2,background:results.elements[selectedElementIdx]?.colorHex||getElementColor(results.elements[selectedElementIdx]?.layerCode||'DEFAULT'),flexShrink:0 }} />
+                      {results.elements[selectedElementIdx]?.elementType}
+                      <button style={{ background:'none',border:'none',color:'#0d1b3e',cursor:'pointer',fontSize:14,lineHeight:1,padding:0,marginLeft:2 }} onClick={()=>setSelectedElementIdx(null)}>✕</button>
+                    </div>
+                  )}
+                </div>
+                {/* Click hint */}
+                {selectedElementIdx===null&&results.elements.some(el=>(el.regions||[]).length>0)&&(
+                  <div style={{ position:'absolute',bottom:16,left:'50%',transform:'translateX(-50%)',background:'rgba(13,27,62,0.82)',color:'#93c5fd',borderRadius:20,padding:'6px 16px',fontSize:12,fontWeight:500,pointerEvents:'none',whiteSpace:'nowrap' }}>
+                    Click a coloured area to select an element
+                  </div>
+                )}
+                <canvas
+                  ref={interactiveCanvasRef}
+                  style={{ maxWidth:'100%',maxHeight:'100%',display:'block',cursor:'crosshair' }}
+                  onClick={handleInteractiveCanvasClick}
+                />
+              </>
+            ) : (
+              <div style={{ textAlign:'center',padding:'0 32px',maxWidth:480 }}>
+                <div style={{ fontSize:56,marginBottom:16 }}>📐</div>
+                <div style={{ fontSize:16,fontWeight:700,color:'#94a3b8',marginBottom:8 }}>Drawing preview not available</div>
+                {results.summary?(
+                  <p style={{ fontSize:13,color:'#64748b',lineHeight:1.7,margin:'0 0 20px' }}>{results.summary}</p>
+                ):(
+                  <p style={{ fontSize:13,color:'#64748b',margin:'0 0 20px' }}>Start a new analysis to see the interactive drawing view.</p>
+                )}
+                <button className="qs-btn qs-btn-ghost qs-btn-sm" style={{ borderColor:'#475569',color:'#94a3b8' }} onClick={resetAll}>+ New Analysis</button>
               </div>
-            </div>
+            )}
           </div>
-
-          {/* Bottom export bar */}
-          <div style={{ marginTop:20,display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap' }}>
-            <button className="qs-btn qs-btn-navy" onClick={exportCSV}>⬇ Download CSV Takeoff</button>
-            <button className="qs-btn qs-btn-primary" onClick={exportPDF}>📄 Generate PDF Report</button>
-            <button className="qs-btn qs-btn-outline" onClick={exportByTrade}>🏗 Export by Trade</button>
-            <button className="qs-btn qs-btn-ghost" style={{ color:'#10b981',borderColor:'#10b981',border:'1.5px solid' }} onClick={handleSaveProject} disabled={isSaving}>
-              {isSaving?'⏳ Saving…':savedProjectId?'✓ Project Saved':'💾 Save Project'}
-            </button>
-          </div>
-
-        </main>
+        </div>
 
         {/* Save toast */}
-        {saveToast && (
-          <div className="fade-in" style={{ position:'fixed',bottom:24,right:24,zIndex:9999,padding:'12px 20px',borderRadius:9,background:saveToast==='saved'?'#059669':saveToast==='error'?'#dc2626':'#0d1b3e',color:'#ffffff',fontSize:13.5,fontWeight:700,boxShadow:'0 4px 20px rgba(0,0,0,0.25)' }}>
-            {saveToast==='saving'?'⏳ Saving project…':saveToast==='saved'?'✓ Project saved — view in My Projects':saveToast==='error'?'✕ Save failed — try again':''}
+        {saveToast&&(
+          <div className="fade-in" style={{ position:'fixed',bottom:24,right:24,zIndex:9999,padding:'12px 20px',borderRadius:9,background:saveToast==='saved'?'#059669':saveToast==='error'?'#dc2626':'#0d1b3e',color:'#fff',fontSize:13.5,fontWeight:700,boxShadow:'0 4px 20px rgba(0,0,0,0.25)' }}>
+            {saveToast==='saving'?'⏳ Saving project…':saveToast==='saved'?'✓ Project saved — view in My Projects':'✕ Save failed — try again'}
           </div>
         )}
       </div>
