@@ -1,0 +1,10 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "next build",
+  "installCommand": "npm install",
+  "functions": {
+    "app/api/analyse-drawing/route.js": {
+      "maxDuration": 60
+    }
+  }
+}
