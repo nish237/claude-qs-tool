@@ -129,7 +129,7 @@ export default function QSDrawingAnalyser() {
 
   // ── Results ──
   const [results,     setResults]     = useState(null);
-  const [activeTab,   setActiveTab]   = useState('lengths');
+  const [activeTab,   setActiveTab]   = useState('elements');
   const [rates,       setRates]       = useState({});
   const [showOverlay, setShowOverlay] = useState(false);
 
@@ -444,7 +444,7 @@ export default function QSDrawingAnalyser() {
       setManualItems([]);
       setAuditLog(prev => [...prev, newAuditEntry('analysed', `AI analysis completed — ${data.elements?.length || 0} elements, ${data.takeoff?.length || 0} takeoff items`)]);
       setScreen('results');
-      setActiveTab('lengths');
+      setActiveTab('elements');
     } catch (err) {
       clearInterval(progressTimer.current);
       const raw = err.message || '';
