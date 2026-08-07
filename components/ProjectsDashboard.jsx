@@ -87,9 +87,9 @@ export default function ProjectsDashboard() {
             width: 38, height: 38, borderRadius: 8, background: '#f59e0b',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontWeight: 900, fontSize: 13, color: '#0d1b3e', letterSpacing: '-0.5px',
-          }}>QS</div>
+          }}>SU</div>
           <div>
-            <div style={{ color: '#ffffff', fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>QuantSurv AI</div>
+            <div style={{ color: '#ffffff', fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>Scale Up</div>
             <div style={{ color: '#93c5fd', fontSize: 11, fontWeight: 500 }}>My Projects</div>
           </div>
         </div>
