@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getAllProjects, deleteProject } from '@/lib/db';
+import UserMenu from '@/components/UserMenu';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -93,12 +94,15 @@ export default function ProjectsDashboard() {
             <div style={{ color: '#93c5fd', fontSize: 11, fontWeight: 500 }}>My Projects</div>
           </div>
         </div>
-        <button
-          className="qs-btn qs-btn-primary qs-btn-sm"
-          onClick={() => router.push('/')}
-        >
-          + New Analysis
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <UserMenu />
+          <button
+            className="qs-btn qs-btn-primary qs-btn-sm"
+            onClick={() => router.push('/')}
+          >
+            + New Analysis
+          </button>
+        </div>
       </header>
 
       <main style={{ flex: 1, maxWidth: 1100, width: '100%', margin: '0 auto', padding: '32px 24px 48px' }}>
@@ -108,7 +112,7 @@ export default function ProjectsDashboard() {
           <div>
             <h1 style={{ fontSize: 24, fontWeight: 800, color: '#0d1b3e', marginBottom: 4 }}>My Projects</h1>
             <p style={{ fontSize: 14, color: '#64748b', margin: 0 }}>
-              {projects.length} saved project{projects.length !== 1 ? 's' : ''} · stored locally in your browser
+              {projects.length} saved project{projects.length !== 1 ? 's' : ''} · synced to your account
             </p>
           </div>
           {projects.length > 0 && (
@@ -268,20 +272,19 @@ export default function ProjectsDashboard() {
           </div>
         )}
 
-        {/* Browser storage notice */}
+        {/* Account storage notice */}
         {!loading && projects.length > 0 && (
           <div className="qs-card" style={{
             marginTop: 32, padding: '14px 20px',
-            background: '#fffbeb', borderColor: '#fde68a',
+            background: '#f0f9ff', borderColor: '#bae6fd',
             display: 'flex', gap: 12, alignItems: 'flex-start',
           }}>
-            <span style={{ fontSize: 18 }}>💾</span>
+            <span style={{ fontSize: 18 }}>☁</span>
             <div>
-              <strong style={{ fontSize: 13, color: '#92400e' }}>Browser Storage</strong>
-              <p style={{ fontSize: 12.5, color: '#78350f', margin: '3px 0 0', lineHeight: 1.6 }}>
-                Projects are stored in your browser&apos;s local IndexedDB. They are private to this
-                device and browser. Clearing site data or switching browsers will remove them.
-                Export to CSV or PDF to keep a permanent copy.
+              <strong style={{ fontSize: 13, color: '#0c4a6e' }}>Saved to your account</strong>
+              <p style={{ fontSize: 12.5, color: '#075985', margin: '3px 0 0', lineHeight: 1.6 }}>
+                These projects are stored against your account, so they follow you across
+                devices — sign in anywhere to see them. Export to CSV or PDF for an offline copy.
               </p>
             </div>
           </div>

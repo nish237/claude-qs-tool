@@ -4,6 +4,8 @@ import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { saveProject, getProject, getAllProjects } from '@/lib/db';
 import { saveRatesToLibrary, loadRateLibrary, saveCompanyDefaults, loadCompanyDefaults } from '@/lib/rates';
+import { countLocalProjects, migrateLocalProjects, hasDismissedMigration, dismissMigration } from '@/lib/localProjects';
+import UserMenu from '@/components/UserMenu';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -159,6 +161,12 @@ export default function QSDrawingAnalyser() {
   // ── Sidebar ──
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarProjects, setSidebarProjects] = useState([]);
+
+  // ── Local-project migration (pre-account projects saved in this browser) ──
+  const [localCount, setLocalCount] = useState(0);
+  const [migrationDismissed, setMigrationDismissed] = useState(true);
+  const [migrating, setMigrating] = useState(false);
+  const [migrationResult, setMigrationResult] = useState(null);
 
   // ── Refs ──
   const calibCanvasRef      = useRef(null);
@@ -625,11 +633,36 @@ export default function QSDrawingAnalyser() {
 
   useEffect(() => { if (showOverlay) drawOverlay(); }, [showOverlay, drawOverlay]);
 
-  // Load projects for sidebar
+  // Load projects for sidebar, and check for pre-account local projects to rescue
   useEffect(() => {
     if (!sidebarOpen) return;
     getAllProjects().then(ps => setSidebarProjects(ps || [])).catch(() => setSidebarProjects([]));
+    setMigrationDismissed(hasDismissedMigration());
+    countLocalProjects().then(setLocalCount).catch(() => setLocalCount(0));
   }, [sidebarOpen]);
+
+  const handleMigrateLocalProjects = useCallback(async () => {
+    setMigrating(true);
+    setMigrationResult(null);
+    try {
+      const result = await migrateLocalProjects();
+      setMigrationResult(result);
+      if (result.migrated > 0) {
+        const ps = await getAllProjects().catch(() => null);
+        if (ps) setSidebarProjects(ps);
+        setLocalCount(0);
+      }
+    } catch {
+      setMigrationResult({ migrated: 0, failed: localCount, total: localCount });
+    } finally {
+      setMigrating(false);
+    }
+  }, [localCount]);
+
+  const handleDismissMigration = useCallback(() => {
+    dismissMigration();
+    setMigrationDismissed(true);
+  }, []);
 
   // ─────────────────────────────────────────────
   // Interactive split-view canvas
@@ -889,6 +922,7 @@ Verify with a qualified QS before use in any tender or contract.</div>
           <div style={{ color: '#ffffff', fontWeight: 800, fontSize: 18, lineHeight: 1.1, letterSpacing: '-0.02em' }}>Scale Up</div>
           <div style={{ color: '#93c5fd', fontSize: 10 }}>Drawing Analyser</div>
         </div>
+        <UserMenu />
         <div style={{
           width: 38, height: 38, borderRadius: 8, background: '#f59e0b',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -926,23 +960,34 @@ Verify with a qualified QS before use in any tender or contract.</div>
           </button>
         </div>
 
-        {/* Sign-in prompt */}
-        <div style={{ padding: '12px 20px', background: 'rgba(245,158,11,0.12)', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-          <div style={{ fontSize: 12, color: '#fbbf24', fontWeight: 600, marginBottom: 4 }}>Sign in to sync projects</div>
-          <div style={{ fontSize: 11, color: '#93c5fd', marginBottom: 8, lineHeight: 1.5 }}>Projects are saved locally. Sign in to back them up and access across devices.</div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button className="qs-btn qs-btn-sm"
-              style={{ flex: 1, background: '#fff', color: '#0d1b3e', border: 'none', fontWeight: 700, fontSize: 11 }}
-              onClick={() => router.push('/sign-in')}>
-              Sign In
-            </button>
-            <button className="qs-btn qs-btn-sm"
-              style={{ flex: 1, background: 'transparent', color: '#93c5fd', border: '1px solid rgba(255,255,255,0.2)', fontSize: 11 }}
-              onClick={() => router.push('/sign-up')}>
-              Sign Up
-            </button>
+        {/* Migration prompt — rescue projects saved before accounts existed */}
+        {localCount > 0 && !migrationDismissed && (
+          <div className="fade-in" style={{ padding: '12px 20px', background: 'rgba(245,158,11,0.12)', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+            {!migrationResult ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+                  <div style={{ fontSize: 12, color: '#fbbf24', fontWeight: 600 }}>
+                    {localCount} project{localCount !== 1 ? 's' : ''} found saved in this browser
+                  </div>
+                  <button onClick={handleDismissMigration}
+                    style={{ background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer', fontSize: 13, lineHeight: 1, flexShrink: 0 }}>✕</button>
+                </div>
+                <div style={{ fontSize: 11, color: '#93c5fd', marginBottom: 8, lineHeight: 1.5 }}>
+                  These were saved before you had an account. Upload them to keep them.
+                </div>
+                <button className="qs-btn qs-btn-sm" style={{ width: '100%', background: '#fff', color: '#0d1b3e', border: 'none', fontWeight: 700, fontSize: 11 }}
+                  onClick={handleMigrateLocalProjects} disabled={migrating}>
+                  {migrating ? '⏳ Uploading…' : '⬆ Upload to my account'}
+                </button>
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: migrationResult.failed > 0 ? '#fca5a5' : '#86efac', fontWeight: 600, lineHeight: 1.5 }}>
+                {migrationResult.migrated > 0 && `✓ ${migrationResult.migrated} project${migrationResult.migrated !== 1 ? 's' : ''} saved to your account. `}
+                {migrationResult.failed > 0 && `${migrationResult.failed} could not be uploaded — try again later.`}
+              </div>
+            )}
           </div>
-        </div>
+        )}
 
         {/* Projects list */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
@@ -1049,7 +1094,7 @@ Verify with a qualified QS before use in any tender or contract.</div>
                     )}
                   </div>
                   <div style={{ display:'flex',gap:7,marginTop:12,flexWrap:'wrap' }}>
-                    {[{icon:'🔒',text:'Secure upload'},{icon:'⚡',text:'AI in seconds'},{icon:'💾',text:'Save projects locally'}].map((b,i) => (
+                    {[{icon:'🔒',text:'Secure upload'},{icon:'⚡',text:'AI in seconds'},{icon:'☁',text:'Saved to your account'}].map((b,i) => (
                       <div key={i} style={{ display:'flex',alignItems:'center',gap:5,background:'#f0f4ff',borderRadius:20,padding:'4px 10px',fontSize:11,color:'#374151',fontWeight:500 }}>
                         <span>{b.icon}</span><span>{b.text}</span>
                       </div>

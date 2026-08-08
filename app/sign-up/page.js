@@ -1,6 +1,8 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
 
 const GoogleIcon = () => (
   <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
@@ -18,8 +20,58 @@ const providerBtn = {
   fontSize: 14, fontWeight: 600, color: '#1a1a2e',
 };
 
-export default function SignUpPage() {
+function SignUpForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const next = searchParams.get('next') || '/';
+
+  const [email, setEmail] = useState('');
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState('');
+  const [busyGoogle, setBusyGoogle] = useState(false);
+  const [busyEmail, setBusyEmail] = useState(false);
+
+  const handleGoogle = async () => {
+    setError('');
+    setBusyGoogle(true);
+    try {
+      const supabase = createClient();
+      const { error: authError } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
+        },
+      });
+      if (authError) { setError(authError.message); setBusyGoogle(false); }
+    } catch (err) {
+      setError(err.message || 'Could not start Google sign-up.');
+      setBusyGoogle(false);
+    }
+  };
+
+  const handleEmail = async (e) => {
+    e.preventDefault();
+    if (!email.trim()) return;
+    setError('');
+    setBusyEmail(true);
+    try {
+      const supabase = createClient();
+      // signInWithOtp creates the account automatically the first time an
+      // address signs in — there is no separate "sign up" call in Supabase.
+      const { error: authError } = await supabase.auth.signInWithOtp({
+        email: email.trim(),
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(next)}`,
+        },
+      });
+      if (authError) { setError(authError.message); setBusyEmail(false); return; }
+      setSent(true);
+    } catch (err) {
+      setError(err.message || 'Could not send the sign-up link.');
+    } finally {
+      setBusyEmail(false);
+    }
+  };
 
   return (
     <div style={{ minHeight: '100vh', background: '#0d1b3e', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
@@ -30,26 +82,73 @@ export default function SignUpPage() {
           <p style={{ fontSize: 13, color: '#64748b' }}>Save takeoffs and sync across devices</p>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-          <button style={providerBtn}><GoogleIcon /> Sign up with Google</button>
-          <button style={providerBtn}>📧 Sign up with Email</button>
-        </div>
+        {sent ? (
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 34, marginBottom: 10 }}>📬</div>
+            <div style={{ fontWeight: 700, color: '#0d1b3e', fontSize: 15, marginBottom: 6 }}>Check your email</div>
+            <div style={{ fontSize: 13, color: '#64748b', lineHeight: 1.6, marginBottom: 20 }}>
+              We sent a link to <strong style={{ color: '#1a1a2e' }}>{email}</strong>.
+              Open it on this device to finish creating your account.
+            </div>
+            <button
+              onClick={() => { setSent(false); setEmail(''); }}
+              style={{ background: 'none', border: 'none', color: '#0d1b3e', fontSize: 13, fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }}>
+              Use a different email address
+            </button>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
+              <button style={{ ...providerBtn, opacity: busyGoogle ? 0.6 : 1 }} onClick={handleGoogle} disabled={busyGoogle}>
+                <GoogleIcon /> {busyGoogle ? 'Redirecting…' : 'Sign up with Google'}
+              </button>
+            </div>
 
-        <div style={{ textAlign: 'center', fontSize: 12, color: '#94a3b8', marginBottom: 20, lineHeight: 1.6 }}>
-          Authentication is coming soon — projects currently save to your browser.
-        </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '4px 0 18px' }}>
+              <div style={{ flex: 1, height: 1, background: '#e2e8f0' }} />
+              <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>OR</span>
+              <div style={{ flex: 1, height: 1, background: '#e2e8f0' }} />
+            </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => router.push('/')}
-            style={{ flex: 1, padding: '10px', border: 'none', background: '#f1f5f9', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#64748b', fontWeight: 600 }}>
-            ← Back to Scale Up
-          </button>
+            <form onSubmit={handleEmail} style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 8 }}>
+              <input
+                type="email" required placeholder="you@example.com" value={email}
+                onChange={e => setEmail(e.target.value)}
+                className="qs-input"
+                style={{ width: '100%' }}
+              />
+              <button type="submit" className="qs-btn qs-btn-primary" disabled={busyEmail} style={{ width: '100%' }}>
+                {busyEmail ? 'Sending…' : '📧 Sign up with email'}
+              </button>
+            </form>
+
+            {error && (
+              <div style={{ padding: '10px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, fontSize: 12.5, color: '#991b1b', marginBottom: 16, lineHeight: 1.5 }}>
+                ⚠ {error}
+              </div>
+            )}
+
+            <div style={{ textAlign: 'center', fontSize: 11.5, color: '#94a3b8', marginBottom: 20, lineHeight: 1.6 }}>
+              No password to remember — we email you a secure one-click link.
+            </div>
+          </>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, marginTop: sent ? 24 : 0 }}>
           <button onClick={() => router.push('/sign-in')}
             style={{ flex: 1, padding: '10px', border: '1.5px solid #0d1b3e', background: '#fff', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#0d1b3e', fontWeight: 700 }}>
-            Sign in
+            Sign in instead
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SignUpPage() {
+  return (
+    <Suspense fallback={null}>
+      <SignUpForm />
+    </Suspense>
   );
 }
